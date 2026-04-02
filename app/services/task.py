@@ -1,6 +1,7 @@
 import math
 import os.path
 import re
+import time
 from os import path
 
 from loguru import logger
@@ -11,6 +12,7 @@ from app.models.schema import VideoConcatMode, VideoParams
 from app.services import llm, material, subtitle, video, voice
 from app.services import state as sm
 from app.utils import utils
+from app.utils.timer import log_elapsed
 
 
 def generate_script(task_id, params):
@@ -243,15 +245,36 @@ def generate_final_videos(
     return final_video_paths, combined_video_paths
 
 
+def _log_time_summary(phase_times: dict, total: float):
+    """Log a summary table of each phase's duration and percentage."""
+    if not phase_times or total <= 0:
+        return
+    header = f"{'阶段':<16} {'耗时':>8} {'占比':>6}"
+    sep = "-" * 34
+    lines = [sep, header, sep]
+    for name, elapsed in phase_times.items():
+        pct = elapsed / total * 100
+        lines.append(f"{name:<16} {elapsed:>7.2f}s {pct:>5.1f}%")
+    lines.append(sep)
+    lines.append(f"{'总计':<16} {total:>7.2f}s {'100.0':>5}%")
+    lines.append(sep)
+    logger.info("\n" + "\n".join(lines))
+
+
 def start(task_id, params: VideoParams, stop_at: str = "video"):
     logger.info(f"start task: {task_id}, stop_at: {stop_at}")
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=5)
+    task_t0 = time.perf_counter()
+    phase_times = {}
 
     if type(params.video_concat_mode) is str:
         params.video_concat_mode = VideoConcatMode(params.video_concat_mode)
 
     # 1. Generate script
-    video_script = generate_script(task_id, params)
+    t = time.perf_counter()
+    with log_elapsed("生成视频脚本"):
+        video_script = generate_script(task_id, params)
+    phase_times["生成视频脚本"] = time.perf_counter() - t
     if not video_script or "Error: " in video_script:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -265,12 +288,15 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         return {"script": video_script}
 
     # 2. Generate terms
-    video_terms = ""
-    if params.video_source != "local":
-        video_terms = generate_terms(task_id, params, video_script)
-        if not video_terms:
-            sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
-            return
+    t = time.perf_counter()
+    with log_elapsed("生成搜索词"):
+        video_terms = ""
+        if params.video_source != "local":
+            video_terms = generate_terms(task_id, params, video_script)
+            if not video_terms:
+                sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
+                return
+    phase_times["生成搜索词"] = time.perf_counter() - t
 
     save_script_data(task_id, video_script, video_terms, params)
 
@@ -283,9 +309,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
     # 3. Generate audio
-    audio_file, audio_duration, sub_maker = generate_audio(
-        task_id, params, video_script
-    )
+    t = time.perf_counter()
+    with log_elapsed("语音合成"):
+        audio_file, audio_duration, sub_maker = generate_audio(
+            task_id, params, video_script
+        )
+    phase_times["语音合成"] = time.perf_counter() - t
     if not audio_file:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -302,9 +331,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         return {"audio_file": audio_file, "audio_duration": audio_duration}
 
     # 4. Generate subtitle
-    subtitle_path = generate_subtitle(
-        task_id, params, video_script, sub_maker, audio_file
-    )
+    t = time.perf_counter()
+    with log_elapsed("生成字幕"):
+        subtitle_path = generate_subtitle(
+            task_id, params, video_script, sub_maker, audio_file
+        )
+    phase_times["生成字幕"] = time.perf_counter() - t
 
     if stop_at == "subtitle":
         sm.state.update_task(
@@ -318,9 +350,12 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
     # 5. Get video materials
-    downloaded_videos = get_video_materials(
-        task_id, params, video_terms, audio_duration
-    )
+    t = time.perf_counter()
+    with log_elapsed("获取视频素材"):
+        downloaded_videos = get_video_materials(
+            task_id, params, video_terms, audio_duration
+        )
+    phase_times["获取视频素材"] = time.perf_counter() - t
     if not downloaded_videos:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
@@ -337,17 +372,21 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=50)
 
     # 6. Generate final videos
-    final_video_paths, combined_video_paths = generate_final_videos(
-        task_id, params, downloaded_videos, audio_file, subtitle_path
-    )
+    t = time.perf_counter()
+    with log_elapsed("生成最终视频"):
+        final_video_paths, combined_video_paths = generate_final_videos(
+            task_id, params, downloaded_videos, audio_file, subtitle_path
+        )
+    phase_times["生成最终视频"] = time.perf_counter() - t
 
     if not final_video_paths:
         sm.state.update_task(task_id, state=const.TASK_STATE_FAILED)
         return
 
-    logger.success(
-        f"task {task_id} finished, generated {len(final_video_paths)} videos."
-    )
+    # Print time statistics summary
+    total_elapsed = time.perf_counter() - task_t0
+    logger.success(f"task {task_id} finished, generated {len(final_video_paths)} videos, 总耗时 {total_elapsed:.2f}s.")
+    _log_time_summary(phase_times, total_elapsed)
 
     kwargs = {
         "videos": final_video_paths,

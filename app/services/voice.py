@@ -1282,7 +1282,7 @@ def siliconflow_tts(
 
                     # 使用文本分割来创建更准确的字幕
                     # 将文本按标点符号分割成句子
-                    sentences = utils.split_string_by_punctuations(text)
+                    sentences = utils.split_string_by_punctuations(text, sentence_end_only=True)
 
                     if sentences:
                         # 计算每个句子的大致时长（按字符数比例分配）
@@ -1595,7 +1595,7 @@ def create_subtitle(sub_maker: submaker.SubMaker, text: str, subtitle_file: str)
     sub_items = []
     sub_index = 0
 
-    script_lines = utils.split_string_by_punctuations(text)
+    script_lines = utils.split_string_by_punctuations(text, sentence_end_only=True)
 
     def match_line(_sub_line: str, _sub_index: int):
         if len(script_lines) <= _sub_index:

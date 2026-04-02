@@ -1,5 +1,7 @@
 x-common-volumes: &common-volumes
   - ./:/MoneyPrinterTurbo
+  - D:/gtihubApp/moneyprinterTurbo/models:/MoneyPrinterTurbo/models
+  - D:/gtihubApp/moneyprinterTurbo/mpt/storage:/MoneyPrinterTurbo/storage
 
 services:
   webui:
@@ -11,6 +13,8 @@ services:
       - "8501:8501"
     command: [ "streamlit", "run", "./webui/Main.py","--browser.serverAddress=127.0.0.1","--server.enableCORS=True","--browser.gatherUsageStats=False" ]
     volumes: *common-volumes
+    environment:
+      - VIDEO_CODEC=libx264
     restart: always
   api:
     build:
@@ -21,4 +25,6 @@ services:
       - "8080:8080"
     command: [ "python3", "main.py" ]
     volumes: *common-volumes
+    environment:
+      - VIDEO_CODEC=libx264
     restart: always

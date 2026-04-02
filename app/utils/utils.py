@@ -164,7 +164,39 @@ def str_contains_punctuation(word):
     return False
 
 
-def split_string_by_punctuations(s):
+def split_string_by_punctuations(s, sentence_end_only=False):
+    """Split text by punctuation marks.
+
+    Args:
+        s: The text to split.
+        sentence_end_only: If True, only split at sentence-ending punctuation
+            (。！？… ! ? .), keeping commas and other punctuation within lines.
+    """
+    if sentence_end_only:
+        end_puncts = set("。！？… ! ? .")
+        result = []
+        txt = ""
+        for i in range(len(s)):
+            char = s[i]
+            if char == "\n":
+                result.append(txt.strip())
+                txt = ""
+                continue
+
+            # Protect decimal numbers like "2.5"
+            if char == "." and i > 0 and s[i - 1].isdigit() and i < len(s) - 1 and s[i + 1].isdigit():
+                txt += char
+                continue
+
+            if char in end_puncts:
+                txt += char
+                result.append(txt.strip())
+                txt = ""
+            else:
+                txt += char
+        result.append(txt.strip())
+        return list(filter(None, result))
+
     result = []
     txt = ""
 

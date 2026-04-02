@@ -1,4 +1,8 @@
 # Use NVIDIA CUDA runtime as parent image (includes CUDA 12.1 + cuDNN 8)
+# GPU acceleration for faster-whisper (subtitle generation)
+# Note: FFmpeg uses system version (libx264 encoding). NVENC encoding is
+# supported for local (non-Docker) deployments where FFmpeg includes GPU support.
+# The auto-detection in video.py will fallback to libx264 when h264_nvenc is unavailable.
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04
 
 # Avoid interactive timezone prompt

@@ -10,6 +10,7 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.utils import utils
+from app.utils.timer import log_elapsed
 
 requested_count = 0
 
@@ -165,17 +166,35 @@ def save_video(video_url: str, save_dir: str = "") -> str:
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/115.0.0.0 Safari/537.36"
     }
 
-    # if video does not exist, download it
-    with open(video_path, "wb") as f:
-        f.write(
-            requests.get(
+    # if video does not exist, download it (with retry on network errors)
+    max_retries = 3
+    for attempt in range(max_retries):
+        try:
+            response = requests.get(
                 video_url,
                 headers=headers,
                 proxies=config.proxy,
                 verify=False,
                 timeout=(60, 240),
-            ).content
-        )
+                stream=True,
+            )
+            response.raise_for_status()
+            with open(video_path, "wb") as f:
+                for chunk in response.iter_content(chunk_size=8192):
+                    if chunk:
+                        f.write(chunk)
+            logger.info(f"video downloaded: {video_path} (attempt {attempt + 1}/{max_retries})")
+            break
+        except Exception as e:
+            logger.warning(f"download attempt {attempt + 1}/{max_retries} failed for {video_url}: {e}")
+            if os.path.exists(video_path):
+                try:
+                    os.remove(video_path)
+                except Exception:
+                    pass
+            if attempt == max_retries - 1:
+                logger.error(f"failed to download video after {max_retries} attempts: {video_url}")
+                return ""
 
     if os.path.exists(video_path) and os.path.getsize(video_path) > 0:
         try:
@@ -210,19 +229,20 @@ def download_videos(
     if source == "pixabay":
         search_videos = search_videos_pixabay
 
-    for search_term in search_terms:
-        video_items = search_videos(
-            search_term=search_term,
-            minimum_duration=max_clip_duration,
-            video_aspect=video_aspect,
-        )
-        logger.info(f"found {len(video_items)} videos for '{search_term}'")
+    with log_elapsed(f"搜索视频 (源: {source})"):
+        for search_term in search_terms:
+            video_items = search_videos(
+                search_term=search_term,
+                minimum_duration=max_clip_duration,
+                video_aspect=video_aspect,
+            )
+            logger.info(f"found {len(video_items)} videos for '{search_term}'")
 
-        for item in video_items:
-            if item.url not in valid_video_urls:
-                valid_video_items.append(item)
-                valid_video_urls.append(item.url)
-                found_duration += item.duration
+            for item in video_items:
+                if item.url not in valid_video_urls:
+                    valid_video_items.append(item)
+                    valid_video_urls.append(item.url)
+                    found_duration += item.duration
 
     logger.info(
         f"found total videos: {len(valid_video_items)}, required duration: {audio_duration} seconds, found duration: {found_duration} seconds"
@@ -238,26 +258,27 @@ def download_videos(
     if video_contact_mode.value == VideoConcatMode.random.value:
         random.shuffle(valid_video_items)
 
-    total_duration = 0.0
-    for item in valid_video_items:
-        try:
-            logger.info(f"downloading video: {item.url}")
-            saved_video_path = save_video(
-                video_url=item.url, save_dir=material_directory
-            )
-            if saved_video_path:
-                logger.info(f"video saved: {saved_video_path}")
-                video_paths.append(saved_video_path)
-                seconds = min(max_clip_duration, item.duration)
-                total_duration += seconds
-                if total_duration > audio_duration:
-                    logger.info(
-                        f"total duration of downloaded videos: {total_duration} seconds, skip downloading more"
-                    )
-                    break
-        except Exception as e:
-            logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
-    logger.success(f"downloaded {len(video_paths)} videos")
+    with log_elapsed("下载视频"):
+        total_duration = 0.0
+        for item in valid_video_items:
+            try:
+                logger.info(f"downloading video: {item.url}")
+                saved_video_path = save_video(
+                    video_url=item.url, save_dir=material_directory
+                )
+                if saved_video_path:
+                    logger.info(f"video saved: {saved_video_path}")
+                    video_paths.append(saved_video_path)
+                    seconds = min(max_clip_duration, item.duration)
+                    total_duration += seconds
+                    if total_duration > audio_duration:
+                        logger.info(
+                            f"total duration of downloaded videos: {total_duration} seconds, skip downloading more"
+                        )
+                        break
+            except Exception as e:
+                logger.error(f"failed to download video: {utils.to_json(item)} => {str(e)}")
+        logger.success(f"downloaded {len(video_paths)} videos")
     return video_paths
 
 
