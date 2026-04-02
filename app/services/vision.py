@@ -12,8 +12,9 @@ from app.config import config
 
 # Qwen VL 模型名称
 QWEN_VL_MODELS = {
-    "plus": "qwen-vl-plus",      # 更便宜，支持 4K
-    "max": "qwen-vl-max",        # 更强，支持 4K
+    "flash": "qwen-vl-flash",    # 快速版，推荐
+    "plus": "qwen-vl-plus",      # 标准版
+    "max": "qwen-vl-max",        # 最强版
     "max-new": "qwen-vl-max-new", # 最新版
 }
 
@@ -21,9 +22,11 @@ QWEN_VL_MODELS = {
 class VisionService:
     """Qwen VL 视觉理解服务"""
 
-    def __init__(self, api_key: str = "", model: str = "qwen-vl-plus"):
+    def __init__(self, api_key: str = "", model: str = "qwen-vl-flash"):
         self.api_key = api_key or config.app.get("qwen_vl_api_key", "")
-        self.model = model or config.app.get("qwen_vl_model", "qwen-vl-plus")
+        if not self.api_key:
+            self.api_key = config.app.get("qwen_api_key", "")  # 兼容 qwen_api_key
+        self.model = model or config.app.get("qwen_vl_model", "qwen-vl-flash")
         self._ensure_deps()
 
     def _ensure_deps(self):
