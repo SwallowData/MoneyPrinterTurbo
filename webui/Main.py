@@ -43,8 +43,10 @@ st.set_page_config(
 # 侧边栏导航
 with st.sidebar:
     st.title("导航")
-    st.page_link("webui/Main.py", label="🎬 视频生成", icon="🎬")
-    st.page_link("webui/materials.py", label="🗃️ 素材库", icon="🗃️")
+    st.markdown("""
+    - 🎬 [视频生成](/)
+    - 🗃️ [素材库](/materials)
+    """)
 
 
 streamlit_style = """
