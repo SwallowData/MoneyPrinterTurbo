@@ -93,6 +93,19 @@ gemini_model_name = "gemini-1.0-pro"
 qwen_api_key = ""
 qwen_model_name = "qwen-max"
 
+########## Qwen VL API Key (for material analysis)
+# If not set, will use qwen_api_key
+qwen_vl_api_key = ""
+qwen_vl_model = "qwen-vl-plus"
+
+########## Material Database Settings
+# 是否启用素材管理系统
+enable_material_db = false
+# 素材数据库路径
+material_db_path = "./storage/materials.db"
+# 素材匹配阈值 (0.0-1.0)，低于此阈值将下载新素材
+material_match_threshold = 0.6
+
 
 ########## DeepSeek API Key
 # Visit https://platform.deepseek.com/api_keys to get your API key

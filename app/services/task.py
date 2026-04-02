@@ -9,6 +9,7 @@ from loguru import logger
 from app.config import config
 from app.models import const
 from app.models.schema import VideoConcatMode, VideoParams
+from app.models.material import SceneShot
 from app.services import llm, material, subtitle, video, voice
 from app.services import state as sm
 from app.utils import utils
@@ -58,6 +59,38 @@ def generate_terms(task_id, params, video_script):
         return None
 
     return video_terms
+
+
+def generate_scene_shots(task_id, params, video_script):
+    """生成视频分镜"""
+    logger.info("\n\n## generating scene shots")
+
+    # 使用 LLM 生成分镜
+    shot_data_list = llm.generate_scene_shots(
+        video_script=video_script,
+        video_subject=params.video_subject,
+        shot_count=6,
+        language=params.video_language or "zh-CN",
+    )
+
+    if not shot_data_list:
+        logger.warning("分镜生成失败，使用空列表")
+        return []
+
+    # 转换为 SceneShot 对象
+    shots = []
+    for shot_data in shot_data_list:
+        shot = SceneShot(
+            shot_id=shot_data.get("shot_id", len(shots) + 1),
+            script_text=shot_data.get("script_text", ""),
+            visual_description=shot_data.get("visual_description", ""),
+            keywords=shot_data.get("keywords", []),
+            duration_hint=shot_data.get("duration_hint", 5.0),
+        )
+        shots.append(shot)
+
+    logger.success(f"生成了 {len(shots)} 个分镜")
+    return shots
 
 
 def save_script_data(task_id, video_script, video_terms, params):
@@ -161,7 +194,11 @@ def generate_subtitle(task_id, params, video_script, sub_maker, audio_file):
     return subtitle_path
 
 
-def get_video_materials(task_id, params, video_terms, audio_duration):
+def get_video_materials(task_id, params, video_terms, audio_duration, shots=None):
+    """获取视频素材（支持素材库匹配）"""
+    # 检查是否启用素材库
+    enable_material_db = config.app.get("enable_material_db", False)
+
     if params.video_source == "local":
         logger.info("\n\n## preprocess local materials")
         materials = video.preprocess_video(
@@ -175,6 +212,24 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
             return None
         return [material_info.url for material_info in materials]
     else:
+        # 如果有分镜数据且启用素材库，使用素材匹配
+        if enable_material_db and shots:
+            logger.info(f"\n\n## getting materials with library matching ({len(shots)} shots)")
+            result = material.get_materials_for_shots(
+                shots=shots,
+                task_id=task_id,
+                params=params,
+                match_threshold=config.app.get("material_match_threshold", 0.6),
+            )
+            if result.shots:
+                video_paths = material.get_video_paths_from_shots(result.shots)
+                if video_paths:
+                    logger.success(f"素材匹配完成: {result.matched_count} 命中, {result.new_download_count} 新下载")
+                    return video_paths
+                # 如果没有获取到路径，回退到普通下载
+                logger.warning("素材库匹配返回空路径，回退到普通下载")
+
+        # 普通下载流程
         logger.info(f"\n\n## downloading videos from {params.video_source}")
         downloaded_videos = material.download_videos(
             task_id=task_id,
@@ -191,6 +246,17 @@ def get_video_materials(task_id, params, video_terms, audio_duration):
                 "failed to download videos, maybe the network is not available. if you are in China, please use a VPN."
             )
             return None
+
+        # 如果启用了素材库，注册新下载的素材
+        if enable_material_db:
+            for video_path in downloaded_videos:
+                if video_path and os.path.exists(video_path):
+                    source = "pexels" if "pexels" in str(params.video_source).lower() else params.video_source
+                    material.register_material(
+                        file_path=video_path,
+                        source=source,
+                    )
+
         return downloaded_videos
 
 
@@ -306,6 +372,13 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
         )
         return {"script": video_script, "terms": video_terms}
 
+    # 2.5. Generate scene shots (new - material management)
+    t = time.perf_counter()
+    shots = []
+    with log_elapsed("生成分镜"):
+        shots = generate_scene_shots(task_id, params, video_script)
+    phase_times["生成分镜"] = time.perf_counter() - t
+
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=20)
 
     # 3. Generate audio
@@ -349,11 +422,11 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     sm.state.update_task(task_id, state=const.TASK_STATE_PROCESSING, progress=40)
 
-    # 5. Get video materials
+    # 5. Get video materials (with scene shot matching if available)
     t = time.perf_counter()
     with log_elapsed("获取视频素材"):
         downloaded_videos = get_video_materials(
-            task_id, params, video_terms, audio_duration
+            task_id, params, video_terms, audio_duration, shots=shots
         )
     phase_times["获取视频素材"] = time.perf_counter() - t
     if not downloaded_videos:

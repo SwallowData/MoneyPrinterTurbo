@@ -1,6 +1,7 @@
 import os
 import random
-from typing import List
+import uuid
+from typing import List, Optional, Tuple
 from urllib.parse import urlencode
 
 import requests
@@ -9,6 +10,9 @@ from moviepy.video.io.VideoFileClip import VideoFileClip
 
 from app.config import config
 from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
+from app.models.material import Material, SceneShot, SceneShotResult
+from app.services.material_db import get_material_db
+from app.services import vision
 from app.utils import utils
 from app.utils.timer import log_elapsed
 
@@ -286,3 +290,236 @@ if __name__ == "__main__":
     download_videos(
         "test123", ["Money Exchange Medium"], audio_duration=100, source="pixabay"
     )
+
+
+# ===========================================
+# 素材管理系统 - 匹配与入库
+# ===========================================
+
+def match_materials(
+    shots: List[SceneShot],
+    match_threshold: float = 0.6,
+) -> Tuple[List[SceneShot], List[SceneShot]]:
+    """
+    匹配分镜与素材库
+
+    Args:
+        shots: 分镜列表
+        match_threshold: 匹配阈值 (0-1)
+
+    Returns:
+        (已匹配的分镜列表, 未匹配的分镜列表)
+    """
+    db = get_material_db()
+    matched_shots = []
+    unmatched_shots = []
+
+    for shot in shots:
+        # 合并 visual_description 和 keywords 进行检索
+        search_keywords = shot.keywords.copy()
+        if shot.visual_description:
+            # 从描述中提取关键词
+            search_keywords.append(shot.visual_description[:50])
+
+        # 搜索相似素材
+        results = db.search_by_keywords(
+            keywords=search_keywords,
+            file_type="video",
+            limit=5,
+        )
+
+        if results:
+            best_material, best_score = results[0]
+            # 归一化分数（简单算法，分数范围 0-2，映射到 0-1）
+            normalized_score = min(best_score / 2.0, 1.0)
+
+            if normalized_score >= match_threshold:
+                shot.matched_material_id = best_material.material_id
+                shot.matched_file_path = best_material.file_path
+                shot.matched_similarity = normalized_score
+                shot.source = "existing"
+                matched_shots.append(shot)
+
+                # 增加使用次数
+                db.increment_use_count(best_material.material_id)
+                logger.info(f"分镜 {shot.shot_id} 匹配到素材: {best_material.file_path} (相似度: {normalized_score:.2f})")
+                continue
+
+        # 未匹配
+        shot.source = "new"
+        unmatched_shots.append(shot)
+        logger.info(f"分镜 {shot.shot_id} 未匹配到素材，需要下载")
+
+    return matched_shots, unmatched_shots
+
+
+def register_material(
+    file_path: str,
+    source: str = "local",
+    source_url: str = "",
+    duration: Optional[float] = None,
+    force_analyze: bool = False,
+) -> Optional[Material]:
+    """
+    注册新素材到素材库
+
+    Args:
+        file_path: 素材文件路径
+        source: 来源 (pexels/pixabay/local)
+        source_url: 原始 URL
+        duration: 视频时长
+        force_analyze: 是否强制重新分析
+
+    Returns:
+        注册的 Material 对象，或 None
+    """
+    # 检查是否已存在
+    db = get_material_db()
+    existing = db.get_by_path(file_path)
+    if existing and not force_analyze:
+        logger.debug(f"素材已存在: {file_path}")
+        return existing
+
+    # 确定文件类型
+    ext = os.path.splitext(file_path)[1].lower()
+    file_type = "video" if ext in [".mp4", ".mov", ".avi", ".mkv", ".webm"] else "image"
+
+    # 获取视频时长
+    if file_type == "video" and duration is None:
+        try:
+            clip = VideoFileClip(file_path)
+            duration = clip.duration
+            clip.close()
+        except Exception as e:
+            logger.warning(f"获取视频时长失败: {file_path} => {e}")
+            duration = 0
+
+    # 创建素材对象
+    material = Material(
+        material_id=str(uuid.uuid4()),
+        file_path=file_path,
+        file_type=file_type,
+        source=source,
+        source_url=source_url,
+        duration=duration,
+    )
+
+    # 使用视觉服务分析素材
+    description, keywords, thumbnail_path = vision.analyze_material(
+        file_path=file_path,
+        file_type=file_type,
+        force=force_analyze,
+    )
+
+    material.description = description
+    material.keywords = keywords
+    material.thumbnail_path = thumbnail_path
+
+    # 写入数据库
+    if db.insert(material):
+        logger.success(f"素材注册成功: {material.material_id} - {file_path}")
+        return material
+    else:
+        logger.error(f"素材注册失败: {file_path}")
+        return None
+
+
+def get_materials_for_shots(
+    shots: List[SceneShot],
+    task_id: str,
+    params,
+    match_threshold: float = 0.6,
+) -> SceneShotResult:
+    """
+    根据分镜获取素材（优先使用素材库，必要时下载）
+
+    Args:
+        shots: 分镜列表
+        task_id: 任务 ID
+        params: 视频参数
+        match_threshold: 匹配阈值
+
+    Returns:
+        SceneShotResult: 包含所有分镜的匹配结果
+    """
+    # 1. 先匹配素材库
+    matched_shots, unmatched_shots = match_materials(shots, match_threshold)
+    logger.info(f"素材匹配完成: {len(matched_shots)} 命中, {len(unmatched_shots)} 需要下载")
+
+    # 2. 如果有未匹配的，需要下载新素材
+    new_download_count = 0
+    if unmatched_shots:
+        # 收集需要下载的关键词
+        download_keywords = []
+        for shot in unmatched_shots:
+            download_keywords.extend(shot.keywords[:3])  # 每个分镜取前3个关键词
+
+        # 去重
+        download_keywords = list(dict.fromkeys(download_keywords))[:10]
+
+        if download_keywords:
+            logger.info(f"开始下载新素材，关键词: {download_keywords}")
+            # 下载视频
+            new_videos = download_videos(
+                task_id=task_id,
+                search_terms=download_keywords,
+                source=params.video_source,
+                video_aspect=params.video_aspect,
+                video_contact_mode=VideoConcatMode.random,
+                audio_duration=sum(s.duration_hint for s in unmatched_shots),
+                max_clip_duration=params.video_clip_duration,
+            )
+
+            # 3. 注册新下载的素材
+            for video_path in new_videos:
+                if video_path and os.path.exists(video_path):
+                    # 从 URL 推断来源
+                    source = "pexels" if "pexels" in str(params.video_source).lower() else params.video_source
+                    material = register_material(
+                        file_path=video_path,
+                        source=source,
+                    )
+                    if material:
+                        new_download_count += 1
+                        # 更新分镜的素材信息（如果有未匹配的分镜需要素材）
+                        for shot in unmatched_shots:
+                            if shot.matched_file_path is None:
+                                shot.matched_material_id = material.material_id
+                                shot.matched_file_path = material.file_path
+                                shot.source = "new"
+                                break
+
+    # 4. 整理结果
+    all_shots = matched_shots + unmatched_shots
+    all_shots.sort(key=lambda x: x.shot_id)
+
+    # 分配素材给未匹配的分镜（如果有新下载的）
+    new_materials = [s for s in all_shots if s.source == "new" and s.matched_file_path]
+    for i, shot in enumerate(unmatched_shots):
+        if shot.matched_file_path is None and i < len(new_materials):
+            shot.matched_material_id = new_materials[i].matched_material_id
+            shot.matched_file_path = new_materials[i].matched_file_path
+
+    return SceneShotResult(
+        shots=all_shots,
+        total_shots=len(all_shots),
+        matched_count=len(matched_shots),
+        new_download_count=new_download_count,
+    )
+
+
+def get_video_paths_from_shots(shots: List[SceneShot]) -> List[str]:
+    """
+    从分镜结果获取视频路径列表
+
+    Args:
+        shots: 分镜列表
+
+    Returns:
+        视频路径列表
+    """
+    paths = []
+    for shot in shots:
+        if shot.matched_file_path and os.path.exists(shot.matched_file_path):
+            paths.append(shot.matched_file_path)
+    return paths

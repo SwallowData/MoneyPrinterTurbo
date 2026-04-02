@@ -466,6 +466,128 @@ Please note that you must use English for generating video search terms; Chinese
     return search_terms
 
 
+def generate_scene_shots(
+    video_script: str,
+    video_subject: str = "",
+    shot_count: int = 6,
+    language: str = "zh-CN",
+) -> List[dict]:
+    """
+    生成视频分镜
+
+    Args:
+        video_script: 视频文案脚本
+        video_subject: 视频主题
+        shot_count: 分镜数量
+        language: 语言
+
+    Returns:
+        分镜列表，每项包含:
+        {
+            "shot_id": 1,
+            "script_text": "对应的文案",
+            "visual_description": "画面描述",
+            "keywords": ["关键词1", "关键词2"],
+            "duration_hint": 5.0
+        }
+    """
+    prompt = f"""
+# Role: Video Scene Designer
+
+## Goals:
+根据视频文案，将内容分解为 N 个分镜场景，每个分镜包含：
+1. 分镜序号
+2. 该分镜对应的文案内容
+3. 该分镜的画面描述（用于匹配素材）
+4. 检索关键词（用于素材库匹配）
+
+## Constrains:
+1. 分镜数量控制在 {shot_count} 个左右
+2. 每个分镜的文案时长建议 5-8 秒
+3. 画面描述要具体，包含主体、场景、动作、氛围
+4. 关键词要适合用于素材检索（1-3 个词）
+5. 只返回 JSON 数组，不要其他内容
+6. 返回的 JSON 数组格式要严格正确，可以被 json.loads 解析
+
+## Output JSON Format:
+```json
+[
+  {{
+    "shot_id": 1,
+    "script_text": "第1段文案内容",
+    "visual_description": "画面描述：描述应该呈现什么样的画面",
+    "keywords": ["关键词1", "关键词2"],
+    "duration_hint": 5.0
+  }},
+  ...
+]
+```
+
+## Context:
+### Video Subject (Optional)
+{video_subject}
+
+### Video Script
+{video_script}
+
+Please respond in the same language as the video script.
+""".strip()
+
+    logger.info(f"生成分镜，数量: {shot_count}")
+
+    import json
+    shots = []
+    for i in range(_max_retries):
+        try:
+            response = _generate_response(prompt)
+            if response and "Error:" not in response:
+                # 尝试提取 JSON 部分
+                match = re.search(r"\[.*]", response, re.DOTALL)
+                if match:
+                    shots = json.loads(match.group())
+                else:
+                    shots = json.loads(response)
+
+                if isinstance(shots, list) and len(shots) > 0:
+                    # 验证字段
+                    validated_shots = []
+                    for shot in shots:
+                        if isinstance(shot, dict) and "script_text" in shot:
+                            validated_shots.append({
+                                "shot_id": shot.get("shot_id", len(validated_shots) + 1),
+                                "script_text": shot["script_text"],
+                                "visual_description": shot.get("visual_description", ""),
+                                "keywords": shot.get("keywords", []),
+                                "duration_hint": shot.get("duration_hint", 5.0),
+                            })
+                    if validated_shots:
+                        shots = validated_shots
+                        break
+        except json.JSONDecodeError as e:
+            logger.warning(f"JSON 解析失败: {e}")
+        except Exception as e:
+            logger.warning(f"分镜生成失败: {e}")
+
+        if i < _max_retries - 1:
+            logger.warning(f"分镜生成重试... {i + 1}")
+
+    if not shots:
+        logger.warning("分镜生成失败，使用简单分镜")
+        # 降级：按段落简单分割
+        paragraphs = video_script.split("\n\n")
+        for idx, para in enumerate(paragraphs[:shot_count]):
+            shots.append({
+                "shot_id": idx + 1,
+                "script_text": para.strip(),
+                "visual_description": para.strip(),
+                "keywords": [video_subject] if video_subject else [],
+                "duration_hint": 5.0,
+            })
+
+    logger.success(f"生成了 {len(shots)} 个分镜")
+    return shots
+
+
 if __name__ == "__main__":
     video_subject = "生命的意义是什么"
     script = generate_script(
