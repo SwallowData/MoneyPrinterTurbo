@@ -181,7 +181,7 @@ class MaterialDatabase:
             return None
 
     def get_by_path(self, file_path: str) -> Optional[Material]:
-        """根据路径获取素材"""
+        """根据完整路径获取素材"""
         try:
             with self._cursor() as cursor:
                 cursor.execute(
@@ -194,6 +194,22 @@ class MaterialDatabase:
             return None
         except Exception as e:
             logger.error(f"获取素材失败: {e}")
+            return None
+
+    def get_by_filename(self, filename: str) -> Optional[Material]:
+        """根据文件名获取素材（用于跨环境匹配）"""
+        try:
+            with self._cursor() as cursor:
+                cursor.execute(
+                    "SELECT * FROM materials WHERE file_path LIKE ?",
+                    (f"%{filename}",)
+                )
+                row = cursor.fetchone()
+                if row:
+                    return self._row_to_material(row)
+            return None
+        except Exception as e:
+            logger.error(f"根据文件名获取素材失败: {e}")
             return None
 
     def search_by_keywords(

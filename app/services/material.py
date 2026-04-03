@@ -373,11 +373,12 @@ def register_material(
     Returns:
         注册的 Material 对象，或 None
     """
-    # 检查是否已存在
+    # 检查是否已存在（使用文件名匹配，兼容不同环境下的路径）
     db = get_material_db()
-    existing = db.get_by_path(file_path)
+    filename = os.path.basename(file_path)
+    existing = db.get_by_filename(filename)
     if existing and not force_analyze:
-        logger.debug(f"素材已存在: {file_path}")
+        logger.debug(f"素材已存在（文件名匹配）: {filename}")
         return existing
 
     # 确定文件类型
@@ -405,6 +406,7 @@ def register_material(
     )
 
     # 使用视觉服务分析素材
+    logger.info(f"🎬 开始解读素材: [{filename}]")
     description, keywords, thumbnail_path = vision.analyze_material(
         file_path=file_path,
         file_type=file_type,
@@ -415,12 +417,16 @@ def register_material(
     material.keywords = keywords
     material.thumbnail_path = thumbnail_path
 
+    # 输出解读结果到日志
+    logger.info(f"📝 素材描述: {description[:200] if description else '无'}...")
+    logger.info(f"🏷️  提取关键词: {keywords}")
+
     # 写入数据库
     if db.insert(material):
-        logger.success(f"素材注册成功: {material.material_id} - {file_path}")
+        logger.success(f"✅ 素材注册成功: {material.material_id} [{filename}]")
         return material
     else:
-        logger.error(f"素材注册失败: {file_path}")
+        logger.error(f"❌ 素材注册失败: {file_path}")
         return None
 
 

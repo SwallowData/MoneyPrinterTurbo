@@ -100,11 +100,11 @@ qwen_vl_model = "qwen-vl-flash"
 
 ########## Material Database Settings
 # 是否启用素材管理系统
-enable_material_db = false
+enable_material_db = true
 # 素材数据库路径
 material_db_path = "./storage/materials.db"
 # 素材匹配阈值 (0.0-1.0)，低于此阈值将下载新素材
-material_match_threshold = 0.6
+material_match_threshold = 0.3
 
 
 ########## DeepSeek API Key
