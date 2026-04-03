@@ -16,6 +16,7 @@ warnings.filterwarnings(
 class VideoConcatMode(str, Enum):
     random = "random"
     sequential = "sequential"
+    match = "match"
 
 
 class VideoTransitionMode(str, Enum):

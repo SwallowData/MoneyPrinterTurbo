@@ -562,6 +562,7 @@ with middle_panel:
         video_concat_modes = [
             (tr("Sequential"), "sequential"),
             (tr("Random"), "random"),
+            (tr("Match"), "match"),
         ]
         video_sources = [
             (tr("Pexels"), "pexels"),

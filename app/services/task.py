@@ -474,9 +474,13 @@ def start(task_id, params: VideoParams, stop_at: str = "video"):
 
     # 6. Generate final videos
     t = time.perf_counter()
+
+    # 匹配模式下传递 shots 以启用分镜级合成
+    use_shots = params.video_concat_mode == VideoConcatMode.match and shots
     with log_elapsed("生成最终视频"):
         final_video_paths, combined_video_paths = generate_final_videos(
-            task_id, params, downloaded_videos, audio_file, subtitle_path
+            task_id, params, downloaded_videos, audio_file, subtitle_path,
+            shots=shots if use_shots else None
         )
     phase_times["生成最终视频"] = time.perf_counter() - t
 
