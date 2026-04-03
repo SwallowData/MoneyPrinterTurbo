@@ -618,3 +618,177 @@ def preprocess_video(materials: List[MaterialInfo], clip_duration=4):
             material.url = video_file
             logger.success(f"image processed: {video_file}")
     return materials
+
+
+def combine_videos_by_shots(
+    combined_video_path: str,
+    shots: List["SceneShot"],
+    video_aspect: "VideoAspect" = VideoAspect.portrait,
+    video_concat_mode: "VideoConcatMode" = VideoConcatMode.sequential,
+    video_transition_mode: "VideoTransitionMode" = None,
+    max_clip_duration: int = 5,
+    threads: int = 2,
+) -> str:
+    """
+    按分镜顺序拼接视频（支持图片素材）
+
+    Args:
+        combined_video_path: 输出视频路径
+        shots: 分镜列表（每个分镜应包含 matched_file_path）
+        video_aspect: 视频宽高比
+        video_concat_mode: 拼接模式（sequential/random）
+        video_transition_mode: 转场模式
+        max_clip_duration: 最大片段时长
+        threads: 线程数
+
+    Returns:
+        合并后的视频路径
+    """
+    from app.models.material import SceneShot
+
+    logger.info(f"按分镜拼接视频，共 {len(shots)} 个分镜")
+
+    output_dir = os.path.dirname(combined_video_path)
+    aspect = VideoAspect(video_aspect)
+    video_width, video_height = aspect.to_resolution()
+
+    processed_clips = []
+    video_duration = 0
+
+    # 按分镜顺序处理（如果是 random 模式，先 shuffle 顺序）
+    shot_order = list(range(len(shots)))
+    if video_concat_mode == VideoConcatMode.random:
+        random.shuffle(shot_order)
+        logger.info("随机模式：分镜顺序已打乱")
+
+    with log_elapsed("分镜片段处理与拼接"):
+        for i, shot_idx in enumerate(shot_order):
+            shot = shots[shot_idx]
+            if not shot.matched_file_path or not os.path.exists(shot.matched_file_path):
+                logger.warning(f"分镜 {shot.shot_id} 无有效素材，跳过")
+                continue
+
+            file_path = shot.matched_file_path
+            clip_duration = shot.duration_hint or max_clip_duration
+
+            logger.info(f"处理分镜 {shot.shot_id}: {file_path}, 时长: {clip_duration}s")
+
+            try:
+                # 判断是图片还是视频
+                ext = os.path.splitext(file_path)[1].lower()
+                is_image = ext in [".jpg", ".jpeg", ".png", ".bmp", ".gif"]
+
+                if is_image:
+                    # 图片转视频片段
+                    clip = ImageClip(file_path).with_duration(clip_duration)
+                    clip = clip.resized(new_size=(video_width, video_height))
+                else:
+                    # 视频片段
+                    video_clip = VideoFileClip(file_path)
+                    src_duration = video_clip.duration
+                    # 截取指定时长
+                    start_time = 0
+                    if src_duration > clip_duration:
+                        # 随机起始位置
+                        start_time = random.uniform(0, src_duration - clip_duration)
+                    clip = video_clip.subclipped(start_time, start_time + clip_duration)
+                    video_clip.close()
+
+                    # 统一分辨率
+                    clip_w, clip_h = clip.size
+                    if clip_w != video_width or clip_h != video_height:
+                        clip_ratio = clip_w / clip_h
+                        video_ratio = video_width / video_height
+                        if abs(clip_ratio - video_ratio) < 0.01:
+                            clip = clip.resized(new_size=(video_width, video_height))
+                        else:
+                            # 裁剪或填充
+                            if clip_ratio > video_ratio:
+                                scale_factor = video_width / clip_w
+                            else:
+                                scale_factor = video_height / clip_h
+                            new_width = int(clip_w * scale_factor)
+                            new_height = int(clip_h * scale_factor)
+                            background = ColorClip(size=(video_width, video_height), color=(0, 0, 0)).with_duration(clip_duration)
+                            clip_resized = clip.resized(new_size=(new_width, new_height)).with_position("center")
+                            clip = CompositeVideoClip([background, clip_resized])
+
+                # 应用转场效果
+                shuffle_side = random.choice(["left", "right", "top", "bottom"])
+                if video_transition_mode and video_transition_mode != VideoTransitionMode.none:
+                    if video_transition_mode == VideoTransitionMode.fade_in:
+                        clip = video_effects.fadein_transition(clip, 0.5)
+                    elif video_transition_mode == VideoTransitionMode.fade_out:
+                        clip = video_effects.fadeout_transition(clip, 0.5)
+                    elif video_transition_mode == VideoTransitionMode.slide_in:
+                        clip = video_effects.slidein_transition(clip, 0.5, shuffle_side)
+                    elif video_transition_mode == VideoTransitionMode.slide_out:
+                        clip = video_effects.slideout_transition(clip, 0.5, shuffle_side)
+
+                # 写入临时文件
+                clip_file = f"{output_dir}/temp-shot-{shot.shot_id:02d}.mp4"
+                clip.write_videofile(
+                    clip_file, logger=None, fps=fps,
+                    codec=get_video_codec(),
+                    ffmpeg_params=get_ffmpeg_params(),
+                )
+                close_clip(clip)
+
+                processed_clips.append(SubClippedVideoClip(
+                    file_path=clip_file,
+                    duration=clip_duration,
+                    width=video_width,
+                    height=video_height,
+                ))
+                video_duration += clip_duration
+
+            except Exception as e:
+                logger.error(f"处理分镜 {shot.shot_id} 失败: {e}")
+
+    # 合并所有片段
+    if not processed_clips:
+        logger.warning("没有可用的视频片段")
+        return combined_video_path
+
+    with log_elapsed("片段合并"):
+        if len(processed_clips) == 1:
+            shutil.copy(processed_clips[0].file_path, combined_video_path)
+            delete_files([clip.file_path for clip in processed_clips])
+            return combined_video_path
+
+        clip_files = [clip.file_path for clip in processed_clips]
+
+        # 尝试 FFmpeg 合并
+        if concat_videos_ffmpeg(clip_files, combined_video_path):
+            delete_files(clip_files)
+            return combined_video_path
+
+        # MoviePy 降级
+        logger.info("使用 MoviePy 合并片段")
+        clips = []
+        for clip_info in processed_clips:
+            try:
+                clips.append(VideoFileClip(clip_info.file_path))
+            except Exception as e:
+                logger.error(f"加载片段失败: {e}")
+
+        if clips:
+            merged = concatenate_videoclips(clips)
+            merged.write_videofile(
+                filename=combined_video_path,
+                threads=threads,
+                logger=None,
+                temp_audiofile_path=output_dir,
+                audio_codec=audio_codec,
+                fps=fps,
+                codec=get_video_codec(),
+                ffmpeg_params=get_ffmpeg_params(),
+            )
+            close_clip(merged)
+            for c in clips:
+                close_clip(c)
+
+        delete_files(clip_files)
+
+    logger.success(f"分镜视频拼接完成: {combined_video_path}")
+    return combined_video_path

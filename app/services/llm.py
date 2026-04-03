@@ -473,7 +473,7 @@ def generate_scene_shots(
     language: str = "zh-CN",
 ) -> List[dict]:
     """
-    生成视频分镜
+    生成视频分镜（带剧情起伏）
 
     Args:
         video_script: 视频文案脚本
@@ -485,38 +485,64 @@ def generate_scene_shots(
         分镜列表，每项包含:
         {
             "shot_id": 1,
+            "phase": "HOOK",
             "script_text": "对应的文案",
             "visual_description": "画面描述",
+            "emotion": "suspenseful",
             "keywords": ["关键词1", "关键词2"],
             "duration_hint": 5.0
         }
     """
     prompt = f"""
-# Role: Video Scene Designer
+# Role: Video Story Designer
 
 ## Goals:
-根据视频文案，将内容分解为 N 个分镜场景，每个分镜包含：
-1. 分镜序号
-2. 该分镜对应的文案内容
-3. 该分镜的画面描述（用于匹配素材）
-4. 检索关键词（用于素材库匹配）
+将视频文案分解为具有剧情起伏的 {shot_count} 个分镜，结构如下：
 
-## Constrains:
-1. 分镜数量控制在 {shot_count} 个左右
-2. 每个分镜的文案时长建议 5-8 秒
-3. 画面描述要具体，包含主体、场景、动作、氛围
-4. 关键词要适合用于素材检索（1-3 个词）
-5. 只返回 JSON 数组，不要其他内容
-6. 返回的 JSON 数组格式要严格正确，可以被 json.loads 解析
+### 剧情阶段（必须按顺序出现）：
+1. **[HOOK] 开场钩子** - 吸引观众，留下悬念，制造好奇（建议 1 个分镜）
+2. **[CONFLICT] 中间冲突** - 描述问题、挑战、对立面（建议 1-2 个分镜）
+3. **[RESOLUTION] 解决冲突** - 找到方法、突破口、转折点（建议 1-2 个分镜）
+4. **[CLIMAX] 迈向光明** - 高潮、胜利、升华、展望未来（建议 1 个分镜）
+
+### 每个分镜需要包含：
+1. `shot_id`: 分镜序号
+2. `phase`: 所属阶段 (HOOK/CONFLICT/RESOLUTION/CLIMAX)
+3. `script_text`: 该分镜对应的文案内容
+4. `visual_description`: 画面描述，要具体包含主体、场景、动作、氛围，用于 AI 生成图片
+5. `emotion`: 情绪标签
+   - suspenseful（悬疑/吸引）- HOOK 阶段
+   - tense（紧张/焦虑）- CONFLICT 阶段
+   - hopeful（希望/期待）- RESOLUTION 阶段
+   - triumphant（胜利/激动）- CLIMAX 阶段
+6. `keywords`: 检索关键词（1-3 个词，适合素材库搜索）
+7. `duration_hint`: 建议时长（秒），HOOK/CLIMAX 建议稍长
+
+### Constrains:
+1. 必须包含 HOOK 和 CLIMAX 两个阶段
+2. 每个分镜的画面描述要适合生成图片
+3. 只返回 JSON 数组，不要其他内容
+4. JSON 格式要严格正确
 
 ## Output JSON Format:
 ```json
 [
   {{
     "shot_id": 1,
-    "script_text": "第1段文案内容",
-    "visual_description": "画面描述：描述应该呈现什么样的画面",
-    "keywords": ["关键词1", "关键词2"],
+    "phase": "HOOK",
+    "script_text": "开场文案内容",
+    "visual_description": "吸引人的画面描述，如：暗色调会议室，有人沉思地看着窗外",
+    "emotion": "suspenseful",
+    "keywords": ["沉思", "夜景"],
+    "duration_hint": 6.0
+  }},
+  {{
+    "shot_id": 2,
+    "phase": "CONFLICT",
+    "script_text": "冲突文案内容",
+    "visual_description": "紧张的画面描述，如：激烈的争论场景，多人表情凝重",
+    "emotion": "tense",
+    "keywords": ["争论", "紧张"],
     "duration_hint": 5.0
   }},
   ...
@@ -530,7 +556,7 @@ def generate_scene_shots(
 ### Video Script
 {video_script}
 
-Please respond in the same language as the video script.
+请用与视频文案相同的语言回复。
 """.strip()
 
     logger.info(f"生成分镜，数量: {shot_count}")
@@ -555,8 +581,10 @@ Please respond in the same language as the video script.
                         if isinstance(shot, dict) and "script_text" in shot:
                             validated_shots.append({
                                 "shot_id": shot.get("shot_id", len(validated_shots) + 1),
+                                "phase": shot.get("phase", "MAIN"),
                                 "script_text": shot["script_text"],
                                 "visual_description": shot.get("visual_description", ""),
+                                "emotion": shot.get("emotion", "neutral"),
                                 "keywords": shot.get("keywords", []),
                                 "duration_hint": shot.get("duration_hint", 5.0),
                             })
@@ -578,13 +606,21 @@ Please respond in the same language as the video script.
         for idx, para in enumerate(paragraphs[:shot_count]):
             shots.append({
                 "shot_id": idx + 1,
+                "phase": "MAIN",
                 "script_text": para.strip(),
                 "visual_description": para.strip(),
+                "emotion": "neutral",
                 "keywords": [video_subject] if video_subject else [],
                 "duration_hint": 5.0,
             })
 
+    # 输出分镜信息
     logger.success(f"生成了 {len(shots)} 个分镜")
+    for shot in shots:
+        logger.info(f"  [{shot['phase']}] 分镜{shot['shot_id']}: {shot['script_text'][:40]}...")
+        logger.info(f"    情绪: {shot.get('emotion', 'neutral')} | 时长: {shot.get('duration_hint', 5.0)}s")
+        logger.info(f"    画面: {shot.get('visual_description', '')[:60]}...")
+
     return shots
 
 

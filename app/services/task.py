@@ -261,8 +261,19 @@ def get_video_materials(task_id, params, video_terms, audio_duration, shots=None
 
 
 def generate_final_videos(
-    task_id, params, downloaded_videos, audio_file, subtitle_path
+    task_id, params, downloaded_videos, audio_file, subtitle_path, shots=None
 ):
+    """
+    生成最终视频
+
+    Args:
+        task_id: 任务 ID
+        params: 视频参数
+        downloaded_videos: 下载的视频路径列表
+        audio_file: 音频文件路径
+        subtitle_path: 字幕文件路径
+        shots: 分镜列表（可选，如果有则使用分镜级合成）
+    """
     final_video_paths = []
     combined_video_paths = []
     video_concat_mode = (
@@ -277,16 +288,33 @@ def generate_final_videos(
             utils.task_dir(task_id), f"combined-{index}.mp4"
         )
         logger.info(f"\n\n## combining video: {index} => {combined_video_path}")
-        video.combine_videos(
-            combined_video_path=combined_video_path,
-            video_paths=downloaded_videos,
-            audio_file=audio_file,
-            video_aspect=params.video_aspect,
-            video_concat_mode=video_concat_mode,
-            video_transition_mode=video_transition_mode,
-            max_clip_duration=params.video_clip_duration,
-            threads=params.n_threads,
-        )
+
+        # 判断是否使用分镜级合成
+        use_shot_based = shots is not None and len(shots) > 0 and config.app.get("enable_material_db", False)
+
+        if use_shot_based:
+            logger.info(f"使用分镜级视频合成，共 {len(shots)} 个分镜")
+            video.combine_videos_by_shots(
+                combined_video_path=combined_video_path,
+                shots=shots,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
+        else:
+            logger.info(f"使用传统视频合成")
+            video.combine_videos(
+                combined_video_path=combined_video_path,
+                video_paths=downloaded_videos,
+                audio_file=audio_file,
+                video_aspect=params.video_aspect,
+                video_concat_mode=video_concat_mode,
+                video_transition_mode=video_transition_mode,
+                max_clip_duration=params.video_clip_duration,
+                threads=params.n_threads,
+            )
 
         _progress += 50 / params.video_count / 2
         sm.state.update_task(task_id, progress=_progress)

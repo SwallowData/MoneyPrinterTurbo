@@ -13,6 +13,7 @@ from app.models.schema import MaterialInfo, VideoAspect, VideoConcatMode
 from app.models.material import Material, SceneShot, SceneShotResult
 from app.services.material_db import get_material_db
 from app.services import vision
+from app.services import image_generator
 from app.utils import utils
 from app.utils.timer import log_elapsed
 
@@ -437,7 +438,12 @@ def get_materials_for_shots(
     match_threshold: float = 0.6,
 ) -> SceneShotResult:
     """
-    根据分镜获取素材（优先使用素材库，必要时下载）
+    根据分镜获取素材
+
+    获取优先级：
+    1. 素材库匹配（最高）
+    2. AI 生成图片（使用魔搭社区）
+    3. 下载视频素材（最低）
 
     Args:
         shots: 分镜列表
@@ -448,12 +454,41 @@ def get_materials_for_shots(
     Returns:
         SceneShotResult: 包含所有分镜的匹配结果
     """
+    logger.info(f"🎬 开始为 {len(shots)} 个分镜获取素材")
+
+    # 检查是否启用 AI 生成
+    enable_ai_generate = config.app.get("enable_ai_generate", False)
+    logger.info(f"   AI 生成: {'启用' if enable_ai_generate else '禁用'}")
+
     # 1. 先匹配素材库
     matched_shots, unmatched_shots = match_materials(shots, match_threshold)
-    logger.info(f"素材匹配完成: {len(matched_shots)} 命中, {len(unmatched_shots)} 需要下载")
+    logger.info(f"📊 素材库匹配: {len(matched_shots)} 命中, {len(unmatched_shots)} 待处理")
 
-    # 2. 如果有未匹配的，需要下载新素材
     new_download_count = 0
+    ai_generated_count = 0
+
+    # 2. 对于未匹配的，尝试 AI 生成图片
+    if enable_ai_generate and unmatched_shots:
+        logger.info(f"🤖 尝试 AI 生成 {len(unmatched_shots)} 个素材...")
+        ai_shots = []
+        for shot in unmatched_shots:
+            # 尝试 AI 生成
+            generated_path = _generate_image_for_shot(shot)
+            if generated_path:
+                # AI 生成成功，更新分镜信息
+                shot.matched_file_path = generated_path
+                shot.source = "ai"
+                ai_generated_count += 1
+                ai_shots.append(shot)
+                logger.success(f"✅ AI 生成素材成功: 分镜{shot.shot_id} -> {generated_path}")
+            else:
+                # AI 生成失败，加入下载队列
+                ai_shots.append(shot)  # 保持原样，后续下载
+
+        # 更新未匹配列表
+        unmatched_shots = ai_shots
+
+    # 3. 对于仍未匹配的，下载视频素材
     if unmatched_shots:
         # 收集需要下载的关键词
         download_keywords = []
@@ -464,7 +499,7 @@ def get_materials_for_shots(
         download_keywords = list(dict.fromkeys(download_keywords))[:10]
 
         if download_keywords:
-            logger.info(f"开始下载新素材，关键词: {download_keywords}")
+            logger.info(f"📥 下载视频素材，关键词: {download_keywords}")
             # 下载视频
             new_videos = download_videos(
                 task_id=task_id,
@@ -476,10 +511,9 @@ def get_materials_for_shots(
                 max_clip_duration=params.video_clip_duration,
             )
 
-            # 3. 注册新下载的素材
+            # 4. 注册新下载的素材并分配给分镜
             for video_path in new_videos:
                 if video_path and os.path.exists(video_path):
-                    # 从 URL 推断来源
                     source = "pexels" if "pexels" in str(params.video_source).lower() else params.video_source
                     material = register_material(
                         file_path=video_path,
@@ -487,31 +521,56 @@ def get_materials_for_shots(
                     )
                     if material:
                         new_download_count += 1
-                        # 更新分镜的素材信息（如果有未匹配的分镜需要素材）
+                        # 找到第一个没有素材的分镜
                         for shot in unmatched_shots:
                             if shot.matched_file_path is None:
                                 shot.matched_material_id = material.material_id
                                 shot.matched_file_path = material.file_path
-                                shot.source = "new"
+                                shot.source = "download"
                                 break
 
-    # 4. 整理结果
-    all_shots = matched_shots + unmatched_shots
+    # 5. 整理结果
+    all_shots = matched_shots.copy()
+    all_shots.extend([s for s in unmatched_shots])
     all_shots.sort(key=lambda x: x.shot_id)
 
-    # 分配素材给未匹配的分镜（如果有新下载的）
-    new_materials = [s for s in all_shots if s.source == "new" and s.matched_file_path]
-    for i, shot in enumerate(unmatched_shots):
-        if shot.matched_file_path is None and i < len(new_materials):
-            shot.matched_material_id = new_materials[i].matched_material_id
-            shot.matched_file_path = new_materials[i].matched_file_path
+    # 统计
+    final_matched = len([s for s in all_shots if s.matched_file_path])
+    logger.info(f"📊 素材获取完成: 共 {len(all_shots)} 个分镜")
+    logger.info(f"   - 素材库匹配: {len(matched_shots)}")
+    logger.info(f"   - AI 生成: {ai_generated_count}")
+    logger.info(f"   - 下载: {new_download_count}")
+    logger.info(f"   - 总计获取素材: {final_matched}")
 
     return SceneShotResult(
         shots=all_shots,
         total_shots=len(all_shots),
         matched_count=len(matched_shots),
         new_download_count=new_download_count,
+        ai_generated_count=ai_generated_count,
     )
+
+
+def _generate_image_for_shot(shot: SceneShot) -> Optional[str]:
+    """
+    为分镜生成图片素材
+
+    Args:
+        shot: 分镜信息
+
+    Returns:
+        生成的图片路径，或 None
+    """
+    try:
+        generator = image_generator.get_image_generator()
+        return generator.generate_from_scene_shot(
+            visual_description=shot.visual_description,
+            emotion=shot.emotion,
+            shot_id=shot.shot_id,
+        )
+    except Exception as e:
+        logger.warning(f"AI 图片生成失败: {e}")
+        return None
 
 
 def get_video_paths_from_shots(shots: List[SceneShot]) -> List[str]:
